@@ -607,6 +607,9 @@ class objc_property:
             return value
 
         def _objc_setter(objc_self, _cmd, new_value):
+            if isinstance(new_value, enum.Enum):
+                new_value = new_value.value
+
             if self._is_py_object and self.weak:
                 # Don't store the object itself but only a Python weakref.
                 new_value = weakref.ref(new_value)

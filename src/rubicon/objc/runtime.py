@@ -1,3 +1,4 @@
+import enum
 import os
 import warnings
 from contextlib import contextmanager
@@ -936,6 +937,9 @@ def send_message(receiver, selector, *args, restype, argtypes=None, varargs=None
 
     send = _msg_send_for_types(restype, argtypes)
 
+    args = [a.value if isinstance(a, enum.Enum) else a for a in args]
+    varargs = [a.value if isinstance(a, enum.Enum) else a for a in varargs]
+
     try:
         result = send(receiver, selector, *args, *varargs)
     except ArgumentError as error:
@@ -1081,6 +1085,12 @@ def send_super(
         send = libobjc["objc_msgSendSuper_stret"]
     else:
         send = libobjc["objc_msgSendSuper"]
+
+    if args:
+        args = [a.value if isinstance(a, enum.Enum) else a for a in args]
+    if varargs:
+        varargs = [a.value if isinstance(a, enum.Enum) else a for a in varargs]
+
     send.restype = restype
     send.argtypes = [POINTER(objc_super), SEL] + argtypes
     result = send(byref(super_struct), selector, *args, *varargs)
@@ -1207,6 +1217,9 @@ def set_ivar(obj, varname, value, weak=False):
     value must be a [`ctypes`][] data object whose type matches that of
     the `ivar`.
     """
+
+    if isinstance(value, enum.Enum):
+        value = value.value
 
     try:
         obj = obj._as_parameter_
