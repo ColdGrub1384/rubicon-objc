@@ -426,9 +426,9 @@ class objc_method:
         else:
             return result
 
-    def class_register(self, class_ptr, attr_name):
+    def class_register(self, class_ptr, attr_name, replace=False):
         name = attr_name.replace("_", ":")
-        add_method(class_ptr, name, self, self.encoding)
+        add_method(class_ptr, name, self, self.encoding, replace=replace)
 
     def protocol_register(self, proto_ptr, attr_name):
         name = attr_name.replace("_", ":")
@@ -466,9 +466,9 @@ class objc_classmethod:
         else:
             return result
 
-    def class_register(self, class_ptr, attr_name):
+    def class_register(self, class_ptr, attr_name, replace=False):
         name = attr_name.replace("_", ":")
-        add_method(libobjc.object_getClass(class_ptr), name, self, self.encoding)
+        add_method(libobjc.object_getClass(class_ptr), name, self, self.encoding, replace=replace)
 
     def protocol_register(self, proto_ptr, attr_name):
         name = attr_name.replace("_", ":")
@@ -498,6 +498,8 @@ class objc_ivar:
         self.vartype = vartype
 
     def class_register(self, class_ptr, attr_name):
+        if libobjc.class_getInstanceVariable(class_ptr, ensure_bytes(attr_name)):
+            return
         return add_ivar(class_ptr, attr_name, self.vartype)
 
     def protocol_register(self, proto_ptr, attr_name):
@@ -570,7 +572,8 @@ class objc_property:
     def class_register(self, class_ptr, attr_name):
         ivar_name = "_" + attr_name
 
-        add_ivar(class_ptr, ivar_name, self.vartype)
+        if not libobjc.class_getInstanceVariable(class_ptr, ensure_bytes(ivar_name)):
+            add_ivar(class_ptr, ivar_name, self.vartype)
 
         # Implementation note:
         # 1. Objective-C objects are stored as strong or weak references in the
@@ -647,16 +650,19 @@ class objc_property:
             attr_name,
             _objc_getter,
             [self.vartype, ObjCInstance, SEL],
+            replace=True,
         )
         add_method(
             class_ptr,
             setter_name,
             _objc_setter,
             [None, ObjCInstance, SEL, self.vartype],
+            replace=True,
         )
 
         attrs = self._get_property_attributes()
-        libobjc.class_addProperty(class_ptr, ensure_bytes(attr_name), attrs, len(attrs))
+        if not libobjc.class_getProperty(class_ptr, ensure_bytes(attr_name)):
+            libobjc.class_addProperty(class_ptr, ensure_bytes(attr_name), attrs, len(attrs))
 
     def dealloc_callback(self, objc_self, attr_name):
         ivar_name = "_" + attr_name
@@ -712,9 +718,9 @@ class objc_rawmethod:
     def __call__(self, *args, **kwargs):
         return self.py_method(*args, **kwargs)
 
-    def class_register(self, class_ptr, attr_name):
+    def class_register(self, class_ptr, attr_name, replace=False):
         name = attr_name.replace("_", ":")
-        add_method(class_ptr, name, self, self.encoding)
+        add_method(class_ptr, name, self, self.encoding, replace=replace)
 
     def protocol_register(self, proto_ptr, attr_name):
         raise TypeError(
@@ -1306,55 +1312,55 @@ class ObjCClass(ObjCInstance, type):
 
     @classmethod
     def _new_from_class_statement(cls, name, bases, attrs, *, protocols, auto_rename):
+        import sys
+        prefix = f"__Py_{sys.version_info.major}{sys.version_info.minor}_"
         basename = name
+        if not name.startswith(prefix):
+            name = prefix + name
         name = ensure_bytes(name)
 
-        if get_class(name).value is not None:
-            if auto_rename or auto_rename is None and cls.auto_rename:
-                suffix = 1
-                while get_class(name).value is not None:
-                    suffix += 1
-                    name = f"{basename}_{suffix}".encode()
-            else:
-                raise RuntimeError(
-                    f"An Objective-C class named {name!r} already exists"
-                )
+        existing_class = get_class(name)
+        if existing_class.value is not None:
+            ptr = existing_class
+            is_new = False
+        else:
+            try:
+                (superclass,) = bases
+            except ValueError as exc:
+                raise ValueError(
+                    f"An Objective-C class must have exactly one base class, "
+                    f"not {len(bases)}"
+                ) from exc
 
-        try:
-            (superclass,) = bases
-        except ValueError as exc:
-            raise ValueError(
-                f"An Objective-C class must have exactly one base class, "
-                f"not {len(bases)}"
-            ) from exc
-
-        # Check that the superclass is an ObjCClass.
-        if not isinstance(superclass, ObjCClass):
-            raise TypeError(
-                f"The superclass of an Objective-C class must be an ObjCClass, "
-                f"not a {type(superclass).__module__}.{type(superclass).__qualname__}"
-            )
-
-        # Check that all protocols are ObjCProtocols, and that there are no duplicates.
-        for proto in protocols:
-            if not isinstance(proto, ObjCProtocol):
+            # Check that the superclass is an ObjCClass.
+            if not isinstance(superclass, ObjCClass):
                 raise TypeError(
-                    f"The protocols list of an Objective-C class must contain "
-                    f"ObjCProtocol objects, not "
-                    f"{type(proto).__module__}.{type(proto).__qualname__}"
+                    f"The superclass of an Objective-C class must be an ObjCClass, "
+                    f"not a {type(superclass).__module__}.{type(superclass).__qualname__}"
                 )
-            elif protocols.count(proto) > 1:
-                raise ValueError(f"Protocol {proto.name} is adopted more than once")
 
-        # Create the ObjC class description
-        ptr = libobjc.objc_allocateClassPair(superclass, name, 0)
-        if ptr is None:
-            raise RuntimeError("Class pair allocation failed")
+            # Check that all protocols are ObjCProtocols, and that there are no duplicates.
+            for proto in protocols:
+                if not isinstance(proto, ObjCProtocol):
+                    raise TypeError(
+                        f"The protocols list of an Objective-C class must contain "
+                        f"ObjCProtocol objects, not "
+                        f"{type(proto).__module__}.{type(proto).__qualname__}"
+                    )
+                elif protocols.count(proto) > 1:
+                    raise ValueError(f"Protocol {proto.name} is adopted more than once")
+
+            # Create the ObjC class description
+            ptr = libobjc.objc_allocateClassPair(superclass, name, 0)
+            if ptr is None:
+                raise RuntimeError("Class pair allocation failed")
+            is_new = True
 
         # Adopt all the protocols.
         for proto in protocols:
-            if not libobjc.class_addProtocol(ptr, proto):
-                raise RuntimeError(f"Failed to adopt protocol {proto.name}")
+            if not libobjc.class_conformsToProtocol(ptr, proto):
+                if not libobjc.class_addProtocol(ptr, proto):
+                    raise RuntimeError(f"Failed to adopt protocol {proto.name}")
 
         # Register all methods, properties, ivars, etc.
         for attr_name, obj in attrs.items():
@@ -1364,7 +1370,11 @@ class ObjCClass(ObjCInstance, type):
                 except AttributeError:
                     pass
                 else:
-                    class_register(ptr, attr_name)
+                    try:
+                        class_register(ptr, attr_name, replace=not is_new)
+                    except TypeError:
+                        # Fallback for registration objects that don't support replace yet
+                        class_register(ptr, attr_name)
 
         # Register any user-defined dealloc method. We treat dealloc differently to
         # inject our own cleanup code for properties, ivars, etc.
@@ -1396,12 +1406,13 @@ class ObjCClass(ObjCInstance, type):
                 _allow_dealloc=True,
             )
 
-        add_method(ptr, "dealloc", _new_delloc, [None, ObjCInstance, SEL])
+        add_method(ptr, "dealloc", _new_delloc, [None, ObjCInstance, SEL], replace=not is_new)
 
-        # Register the ObjC class
-        libobjc.objc_registerClassPair(ptr)
+        if is_new:
+            # Register the ObjC class
+            libobjc.objc_registerClassPair(ptr)
 
-        return ptr, name, attrs
+        return ptr, name, attrs, is_new
 
     def __new__(
         cls,
@@ -1413,6 +1424,8 @@ class ObjCClass(ObjCInstance, type):
         auto_rename=None,
     ):
         # See class docstring for usage details.
+
+        is_new = True
 
         if (bases is None) ^ (attrs is None):
             raise TypeError("ObjCClass arguments 2 and 3 must be given together")
@@ -1438,13 +1451,14 @@ class ObjCClass(ObjCInstance, type):
                 ):
                     return ObjCMetaClass(ptr)
         else:
-            ptr, name, attrs = cls._new_from_class_statement(
+            ptr, name, attrs, is_new = cls._new_from_class_statement(
                 name_or_ptr,
                 bases,
                 attrs,
                 protocols=protocols,
                 auto_rename=auto_rename,
             )
+        is_new = False if is_new is None else is_new
 
         objc_class_name = name.decode("utf-8")
 
@@ -1481,6 +1495,9 @@ class ObjCClass(ObjCInstance, type):
         # name or pointer, not when creating a new class.
         # If there is no cached instance for ptr, a new one is created and cached.
         self = super().__new__(cls, ptr, objc_class_name, (ObjCInstance,), new_attrs)
+
+        if not is_new and bases is not None:
+            self._reset_caches()
 
         return self
 
@@ -1681,6 +1698,21 @@ class ObjCClass(ObjCInstance, type):
                 f"issubclass(X, {self!r}) arg 1 must be an ObjCClass, "
                 f"not {type(subclass).__module__}.{type(subclass).__qualname__}"
             )
+
+    def _reset_caches(self):
+        """Clears the method and property caches for this class.
+        This is used when a class is redefined to ensure that the changes take effect.
+        """
+        with self.cache_lock:
+            # Free old methods list if it exists.
+            if self.methods_ptr is not None:
+                libc.free(self.methods_ptr)
+                self.methods_ptr = None
+
+            self.instance_method_ptrs.clear()
+            self.instance_methods.clear()
+            self.instance_properties.clear()
+            self.partial_methods.clear()
 
     def _load_methods(self):
         if self.methods_ptr is not None:
