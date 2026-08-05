@@ -1502,6 +1502,9 @@ class ObjCClass(ObjCInstance, type):
         if not is_new and bases is not None:
             self._reset_caches()
 
+        if "__classcell__" in attrs:
+            attrs["__classcell__"].cell_contents = self
+
         return self
 
     def __init__(self, *args, **kwargs):
